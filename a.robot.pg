@@ -1,0 +1,752 @@
+.PROGRAM a.robot()
+;
+; ABSTRACT:     Module program for application sample robot programs
+;
+; INPUTS:       None
+;
+; OUTPUTS:      None
+;
+
+        WHILE TRUE DO
+
+    ;MAKE SURE THE DEMO MAIN IS RUNNING
+            runstate = TASK(1,0)
+
+            CASE runstate OF
+
+              VALUE 0, 1, 2, 3:
+
+                WHILE NOT SWITCH(POWER) DO
+                    IF ((STATE(4) BAND ^B100) <> 4) THEN ;if not estopped enable power
+                        ENABLE POWER
+                    END
+                    WAIT
+                END
+
+                WHILE PARAMETER(NOT.CALIBRATED) <> 0 DO          ;if not calibrated, calibrate
+                    CALIBRATE
+                    WAIT.EVENT , 0.25
+                END
+
+                ABORT 0
+                WAIT.EVENT , 0.25
+                KILL 0
+
+
+                DETACH ()
+                EXECUTE 0 rob.main() ;  <--- Change Program here
+
+              VALUE 4:
+
+                IF STATE(4) == 588 THEN
+                    ABORT 0
+                    WAIT.EVENT , 0.25
+                    KILL 0
+                END
+
+                WAIT
+            END           ; case runstate of
+
+
+
+            WAIT ; free up CPU while looping
+        END ;while true do
+
+
+.END
+
+.PROGRAM rob.move.safe()
+; Move to the safe position
+
+        MOVE safe.loc
+        BREAK
+
+        RETURN
+.END
+
+.PROGRAM rob.pick(posx, posy)
+;
+        TYPE "x,y,count: ", posx, posy, count
+        SET pick = TRANS(posx,posy,78.4,0,180,0)
+        MOVE rob.pick.mid
+        BREAK
+        APPRO pick, 50
+
+        MOVE pick
+        BREAK
+        SIGNAL 4      ;close the gripper instruction
+
+        RETURN
+.END
+
+.PROGRAM rob.place(pallet)
+
+        ; if you are using pallet, then do this
+        IF pallet THEN
+
+            col = INT((place.pal.index-1)/place.pal.xct)
+            row = ((place.pal.index-1) MOD place.pal.xct)
+            SET slot.off = place.pal.off:TRANS(row*place.pal.xsp,col*place.pal.ysp)
+            SET place.offset = TRANS(0,0,30,0,0,0)
+            SET place.loc = place.frame:slot.off:place.offset
+
+; Approach and move to the location
+
+            ;APPRO place.loc, 50
+            DEPART 80
+
+            APPRO place.loc, 100
+            BREAK
+            MOVE place.loc
+            BREAK
+
+; Calculate the next position in the pallet, handling rollover
+
+            place.pal.index = place.pal.index+1
+            IF (place.pal.index > place.pal.xct*place.pal.yct) THEN
+                place.pal.index = 1
+            END
+
+; Clear any tool applied for the placement operation
+
+            ;IF (NOT IDENTICAL(TOOL,grip.tool)) THEN
+            ;TOOL grip.tool
+        ;END
+        ; if you are not using pallet
+        ELSE
+            APPRO place.loc, 100
+            MOVE place.loc
+            BREAK
+        END
+
+        ; turn off gripper
+        SIGNAL -4
+
+        RETURN
+.END
+
+.PROGRAM rob.main()
+;
+        ;GLOBAL REAL rob.run
+        GLOBAL $af.ini, $af.ff, $af.fb, $af.flp, $af.dsp
+        GLOBAL plt.x, plt.y, x.cnt, y.cnt, x.val, y.val
+        GLOBAL LOC rob.pick.mid, safe.loc, place.loc
+
+        GLOBAL REAL place.pal.index, place.pal.xct, place.pal.yct, place.pal.xsp, place.pal.ysp
+        GLOBAL LOC place.pal.off, place.frame, place.offset
+        AUTO REAL row, col
+        AUTO LOC slot.off
+
+        x.cnt = 1
+        y.cnt = 1
+        x.val = 0
+        y.val = 0
+
+        ACCEL 120, 120
+        SPEED 100 ALWAYS
+
+        ;; delete old values
+        MCS "deletel xyn"
+        MCS "deletel posx"
+        MCS "deletel posy"
+        MCS "deletel count"
+        MCS "deletel ff.hist"
+        MCS "deletel pk.hist"
+        MCS "deletel fb.hist"
+
+        SET rob.pick.mid = TRANS(104.95,324.767,169.508,0,180,96.5)
+        SET safe.loc = TRANS(213.19,259.443,149.828,0,180,96.5)
+        SET place.loc = TRANS(218.11,237.347,64.548,0,180,96.5)
+        rob.number = 1
+
+        ;; anyfeeder commands:
+        $af.ini = "x=16"+$CHR(13)  ; initialize the anyfeeder, add carriage return at the end ($CHR(13)) of the command
+        $af.ff = "ab[1]=1 x=1"+$CHR(13)         ; feed forward
+        $af.fb = "ab[2]=2 x=2"+$CHR(13)         ; feed backward
+        $af.flp = "ab[5]=5 x=5"+$CHR(13) ; flip parts
+        $af.dsp = "ab[6]=6 x=6"+$CHR(13) ; set despense repetitions (6) and execute despense (x=6)
+        ;rob.run = TRUE
+
+; Initialize error reporting and move the robot to a safe location
+        ;CALL err.init()
+        CALL rob.move.safe()
+
+        ;create the pallet frame
+        CALL rob.place.init()
+
+        ; turn on anyfeeder relay
+        SIGNAL 3
+
+; connect camera and anyfeeder
+        CALL cam.tcp.sock(cam)
+        CALL af.serial.sock(anyf)
+
+        ; send (write) ini command to anyfeeder
+        CALL af.cmd(anyf, $af.ini)
+; select and attach robot to task 0
+        SELECT ROBOT = rob.number
+        ATTACH (0, 1)
+; if you like to use "place to a pallet"
+        pallet = 1
+; process part
+        TYPE "starting the process"
+        WHILE (TRUE) DO
+            CALL rob.part.proc(cam, anyf, posx, posy)
+            CALL rob.pick(posx, posy)
+            CALL rob.place(pallet)
+        END
+
+        ; turn off anyfeeder relay
+        SIGNAL -3
+
+        CALL rob.move.safe()
+
+        ; close all connections
+        FCLOSE (cam)
+        DETACH (cam)
+
+        DETACH (anyf)
+
+        RETURN
+.END
+
+.PROGRAM af.test()
+;
+;
+        ;MCS "cls"
+
+        ATTACH (anyf1, 4) "SERIAL:0"
+
+        ; set the correct baud rate and other parameters for the connection (anyfeeder params)
+        FSET (anyf1) "/SPEED 9600 /BYTE_LENGTH 8 /STOP_BITS 1 /PARITY NONE /FLOW NONE"
+
+        status = IOSTAT(anyf1) ;Check status of anyfeeder
+
+         ;Connection Error Handling
+        IF status < 0 THEN
+            TYPE "Error from ATTACH (anyfeeder): ", $ERROR(status)
+            ;GOTO 100
+        END
+        ; initialize the anyfeeder, add carriage return at the end ($CHR(13)) of the command
+        $af.ini = "x=16"+$CHR(13)
+
+        ; send (write) ini command to anyfeeder
+        WRITE (anyf1) $af.ini
+        WAIT.EVENT , 1
+
+        $af.str = "{128}"+$CHR(13)
+        WRITE (anyf1) $af.str
+        WAIT.EVENT , 1
+
+        ; send (write) ini command to anyfeeder
+        $af.str = "ab[22]=1 x=22"+$CHR(13)
+        WRITE (anyf1) $af.str
+        WAIT.EVENT , 1
+
+        $af.str = "ab[6]=1"+$CHR(13)
+        WRITE (anyf1) $af.str
+        WAIT.EVENT , 1
+
+        $af.str = "x=6"+$CHR(13)
+        WRITE (anyf1) $af.str
+        WAIT.EVENT , 1
+
+        $cmd = "x=6"+$CHR(13)
+
+        start = TIMER(0)
+      ; Loop until $cmd gets repeated in response
+        c = 0
+        DO
+            c = GETC(anyf1,1)
+            IF IOSTAT(anyf1,0) > 0 THEN
+            $af.answer[count] = $af.answer[count]+$CHR(c)
+            ;TYPE c, " = ", $CHR(c)
+            TYPE $CHR(c)
+            ELSE
+            WAIT
+            END
+            TYPE $af.answer
+
+            IF (TIMER(0)-start > 30) GOTO 120
+        UNTIL POS($af.answer[count],$cmd) > 0
+
+        ; Loop until response containing an "m" such as
+      ; "m21", "m11", "m20", "m10", "m27", "m16", ...
+        DO
+            count = count+1
+            DO
+            $af.answer[count] = ""
+            c = 0
+            DO
+                c = GETC(anyf1,1) ; Read Serial Buffer
+                IF IOSTAT(anyf1,0) > 0 THEN
+                $af.answer[count] = $af.answer[count]+$CHR(c)
+                TYPE $CHR(c)
+                ELSE
+                WAIT
+                END
+                timeout = (TIMER(0)-start > 30)
+            UNTIL ((LEN($af.answer[count]) >= 3) AND (c == 13)) OR timeout
+            IF timeout GOTO 120
+            UNTIL POS($af.answer[count],"m") > 0
+
+          ; Extract data from response
+            $af.answer[count] = $MID($af.answer[count],POS($af.answer[count],"m"),3)
+
+          ; Interpret message received
+          ; Decode status (i.e. m21="m2 busy", m10="m1 action completed")
+            af.answer[count] = VAL($MID($af.answer[count],3,1))
+          ;<DEBUG>
+            ;TYPE " answer[", count, "] ", $af.answer[count], " CODE:", /s
+            ;TYPE af.answer[count]
+          ;</DEBUG>
+          ; error[fdr] when (i.e. m22="m2 unknown cmd", m16="m1 not initialized")
+            IF af.answer[count] > 1 GOTO 110
+            fdr.ok = FALSE
+            IF count == 4 THEN
+            fdr.ok = (af.answer[count-1] == 0) AND (af.answer[count] == 0)
+            fdr.ok = fdr.ok OR (af.answer[count-2] == 0) AND (af.answer[count] == 0)
+            END
+        UNTIL fdr.ok OR timeout
+
+        GOTO 130
+
+ ;------------------------------------------------------------------------------
+   100    TYPE /C4, "af.test() - FATAL error in response", count, ": ", $af.answer[count]
+        DETACH (anyf1)
+        HALT
+;------------------------------------------------------------------------------
+   110    TYPE /C4, "af.test() - error in response", count, ": ", $af.answer[count]
+        error[fdr] = af.answer[count]
+        RETURN
+;------------------------------------------------------------------------------
+   120    TYPE /C4, "af.test() - FATAL error feeder", 1, " - Communication Timeout"
+        DETACH (anyf1)
+        HALT
+
+   130    DETACH (anyf1)
+
+.END
+
+.PROGRAM af.cmd(anyf, $af.str)
+;
+        WRITE (anyf) $af.str
+        WAIT.EVENT , 5
+.END
+
+.PROGRAM cam.rd(cam, $instr, xyn)
+;
+; check to see if the camera sending <error> values
+            ; i.e. no parts in vision
+        ;; check to see if string ($instr) read from camera = "[Insp1]" only, if yes, this is an error should be handled.
+        ;; trigger camera again and parse
+        ;TYPE "cam read routine"
+        ;TYPE "$instr: ", $instr
+
+; if non of the cases above is valid, then read the $instr normally
+
+        ; $temp = $DECODE($instr,"-",0)
+     3    $temp_posx = $DECODE($instr,",",0) ;Pick off a number string
+        $tmp = $DECODE($instr,",",1)
+       ;; IF $temp_posx == "<error>" THEN
+       ; xyn[0] = 0
+       ; xyn[1] = 0
+      ;  xyn[2] = 0
+   ;; ELSE
+        ; reading posx value
+        xyn[0] = VAL($temp_posx) ;Convert to real value
+
+        $temp_posy = $DECODE($instr,",",0) ;Pick off a number string
+        $tmp = $DECODE($instr,",",1)
+        ; reading posy value
+        xyn[1] = VAL($temp_posy) ;Convert to real value
+
+        ; reading part count value
+        $temp_count = $DECODE($instr,",",0)    ;Pick off a number string
+        $tmp = $DECODE($instr,",",1)
+
+        xyn[2] = VAL($temp_count) ;Convert to real value
+    ;END
+
+
+        ;;; read the feed forward region data (histogram ave pixel value)
+        ;$temp = $DECODE($instr,"-",0)
+        $temp_posx = $DECODE($instr,",",0) ;Pick off a number string
+        $tmp = $DECODE($instr,",",1)
+
+        ; saving value
+        xyn[3] = VAL($temp_posx) ;Convert to real value
+
+        ;;; read the pick region data (histogram ave pixel value)
+        $temp_posy = $DECODE($instr,",",0) ;Pick off a number string
+        $tmp = $DECODE($instr,",",1)
+
+        ; saving value
+        xyn[4] = VAL($temp_posy) ;Convert to real value
+
+        ;;; read the feed backward region data (histogram ave pixel value)
+        $temp_count = $DECODE($instr,",",0) ;Pick off a number string
+        $tmp = $DECODE($instr,",",1)
+
+        ; saving value
+        xyn[5] = VAL($temp_count) ;Convert to real value
+
+.END
+
+.PROGRAM cam.trg(cam, $instr)
+;
+;; this is to test ACE save mode
+;* Copyright (c) 2018 by {company name}
+        $out = "Trigger" ;This is the software trigger command specified in the FrontRunner software
+
+        WRITE (cam) $out ;Send Trigger command to the server (microscan sensor)
+
+        WAIT.EVENT , 1 ;Wait commands might be necessary to handle the sensor command timings
+
+        READ (cam, 1) $instr ;Read Data from the port buffer
+
+.END
+
+.PROGRAM rob.part.proc(cam, anyf, posx, posy)
+;
+
+
+        ; these values are the hard coded values for the work region.
+        ; i.e. the region where the robot can pick parts without hitting the anyfeeder.
+        ; this is an application specific values. users need to update those values for their application
+        ; Xlimit: xmin= -250, xmax= -28
+        ; Ylimit: ymin= 220,  ymax= 380
+        xmin = -250
+        xmax = -28
+        ymin = 220
+        ymax = 380
+
+        ; feedbackward region: xmin, xmax, ymin, ymax,
+        fb.xmin = -250
+        fb.xmax = -28
+        fb.ymin = 220
+        fb.ymax = 270
+
+        count = 0
+
+
+        $instr = ""
+            ;; check anfyeeder histogram values
+    10    CALL cam.pos.updat(cam, posx, posy, count, ff.hist, pk.hist, fb.hist)
+
+        WHILE ((count < 1) AND ((pk.hist > 5) OR (ff.hist > 5) OR (fb.hist > 5))) DO
+            CALL af.hist(anyf, count, ff.hist, pk.hist, fb.hist)    ;; read histogram values, issue anyfeeder commands accordingly
+            CALL cam.pos.updat(cam, posx, posy, count, ff.hist, pk.hist, fb.hist)
+        END
+
+        WHILE ((count < 1) AND (pk.hist < 5) AND (ff.hist < 5) AND (fb.hist < 5)) DO
+
+            TYPE "inside main anyfeeder while loop"
+            ; shake anyfeeder one time (despense command)
+            CALL af.cmd(anyf, $af.dsp)
+            CALL cam.pos.updat(cam, posx, posy, count, ff.hist, pk.hist, fb.hist)
+            ; Check status of anyfeeder
+            status = IOSTAT(anyf)
+            ; Connection Error Handling
+            IF status < 0 THEN
+            TYPE "Error issuing command to anyfeeder: ", $ERROR(status)
+            END
+            ; end of while (count < 2) loop
+        END
+
+        WHILE ((count < 1) AND (ff.hist > 5)) DO
+
+            TYPE "inside anyfeeder ff while loop"
+            ; shake anyfeeder one time (despense command)
+            CALL af.cmd(anyf, $af.ff)
+            CALL cam.pos.updat(cam, posx, posy, count, ff.hist, pk.hist, fb.hist)
+            ; Check status of anyfeeder
+            status = IOSTAT(anyf)
+            ; Connection Error Handling
+            IF status < 0 THEN
+            TYPE "Error issuing command to anyfeeder: ", $ERROR(status)
+            END
+            ; end of while (count < 2) loop
+        END
+
+        WHILE ((count < 1) AND (fb.hist > 5)) DO
+
+            TYPE "inside anyfeeder ff while loop"
+            ; shake anyfeeder one time (despense command)
+            CALL af.cmd(anyf, $af.fb)
+            CALL cam.pos.updat(cam, posx, posy, count, ff.hist, pk.hist, fb.hist)
+            ; Check status of anyfeeder
+            status = IOSTAT(anyf)
+            ; Connection Error Handling
+            IF status < 0 THEN
+            TYPE "Error issuing command to anyfeeder: ", $ERROR(status)
+            END
+            ; end of while (count < 2) loop
+        END
+
+        ;TYPE "after anyfeeder while loops"
+            ;Robot Pick and Place Section
+;           see if the pick locations within safe pick range
+        IF ((posx == 0) OR (posy == 0)) THEN
+            TYPE "Parts out of range"
+            GOTO 10
+            ; end if parts out of range
+        END
+
+
+
+
+
+.END
+
+.PROGRAM cam.pos.updat(cam, posx, posy, count, ff.hist, pk.hist, fb.hist)
+;
+        ;; trigger the camera, read tcp serial buffer to $instr
+        CALL cam.trg(cam, $instr)
+
+        ;; process data in $instr. save x,y,count to xyn array
+        CALL cam.rd(cam, $instr, xyn)
+        posx = xyn[0]
+        posy = xyn[1]
+        count = xyn[2]
+        ff.hist = xyn[3] ; ave histogram value in feed forward region
+        pk.hist = xyn[4] ; ave histogram value in pick region
+        fb.hist = xyn[5] ; ave histogram value in feed backward region
+.END
+
+.PROGRAM cam.tcp.sock(cam)
+;
+;*************************************************************************************
+;
+;                        COMMUNICATION BETWEEN ADEPT ROBOT AND MICROSCAN VISION SENSOR
+;                               FOR A STATIC PICK AND PLACE APPLICATION
+;
+;*************************************************************************************
+
+
+        ; string variables declaration
+
+        ; Attach to the TCP device
+        ATTACH (cam, 4) "TCP"
+
+        ;specify the address of Microscan sensor
+        FSET (cam) "/NODE 'MV4000' /ADDRESS 172 17 6 86"
+
+        ;TYPE "lun: ", lun
+
+        status = IOSTAT(cam) ;Check status of ATTACH
+
+        ;Connection Error Handling
+        IF status < 0 THEN
+            TYPE "Error from ATTACH: ", $ERROR(status)
+            GOTO 100
+        END
+        ;ATTACH(0)
+;*************************************************************************************
+
+; "MV4000" is the name this controller uses to refer to the "server" machine,
+; the MV4000 in this case, defined by using an FSET command or instruction.
+
+; A local port number is automatically establised, since the /LOCAL_PORT
+; keyword is absent. The remote port number for the server must be
+; known--"6000" in this case. The buffer size is set to 1024 bytes.
+
+        FOPEN (cam, 0) "MV4000 /REMOTE_PORT 49211 /BUFFER_SIZE 1024"
+
+        status = IOSTAT(cam) ;Check status of FOPEN
+
+        ;Connection Error Handling
+        IF status < 0 THEN
+            TYPE "Error from FOPEN (camera): ", $ERROR(status)
+            GOTO 100
+        END
+
+;*************************************************************************************
+
+; Close open connection and access to Monitor, and release logical units.
+        RETURN
+   100    FCLOSE (cam)
+        DETACH (cam)
+
+.END
+
+.PROGRAM af.serial.sock(anyf)
+
+;*************************************************************************************
+        ; this is code created to talk to adept anyfeeder over serial port (RS232)
+        ; by Dolf, OAT ADE team. 7/20/2018.
+
+        ; turn on the AF's relay.
+        SIGNAL 3
+        WAIT.EVENT , 1
+        ; set robot ACCEL/DECEL
+
+
+        ; attaching serial 0 (eAIB default serial port)
+        ; use XBELTIO cable to connect to output serial
+        ; use serial cable (straight through cable, not null modem)
+        ; male to female to connect between XBELTIO cable and anyfeeder RS232 J2 (serial port)
+        ATTACH (anyf, 4) "SERIAL:0"
+
+        ; set the correct baud rate and other parameters for the connection (anyfeeder params)
+        FSET (anyf) "/SPEED 9600 /BYTE_LENGTH 8 /STOP_BITS 1 /PARITY NONE /FLOW NONE"
+
+        status = IOSTAT(anyf) ;Check status of anyfeeder
+
+         ;Connection Error Handling
+        IF status < 0 THEN
+            TYPE "Error from ATTACH (anyfeeder): ", $ERROR(status)
+            GOTO 100
+        END
+        RETURN
+   100    DETACH (anyf)
+
+.END
+
+.PROGRAM tcp.flush(cam, $in.str, stt)
+;
+
+    ; Loop and read until there is nothing on the TCP port.
+        WHILE TRUE DO
+            READ (cam, handle, 1) $in.str
+            status = IOSTAT(cam)
+            CASE status OF
+              VALUE 1:
+    ; We got data so keep reading until it is all gone.
+              VALUE -526:
+            GOTO 100
+              ANY
+            stt = status
+            GOTO 100
+            END
+        END
+   100
+
+.END
+
+.PROGRAM af.hist(anyf, count, ff.hist, pk.hist, fb.hist)
+;
+        ;; histogram values:
+        ; xyn[3] = feed forward region ave pixel value
+        ; xyn[4] = pick (middle) region ave pixel value
+        ; xyn[5] = feed bakcward region ave pixel value
+        ;; check histogram of parts
+        IF (ff.hist >= 5) THEN
+        ;; feed parts forward
+            CALL af.cmd(anyf, $af.ff)
+        END
+
+        IF (pk.hist >= 5) THEN
+        ;; too many parts in pick region, but unable to locate by camera
+        ;; flip parts to disperse them
+            CALL af.cmd(anyf, $af.flp)
+        END
+
+        IF (fb.hist >= 5) THEN
+            CALL af.cmd(anyf, $af.fb)
+        END
+.END
+
+.PROGRAM auto_start()
+;
+; ABSTRACT:
+;
+; INPUTS:    
+;
+; OUTPUTS:   
+;
+; SIDE EFFECTS:
+;
+; DATA STRUCT:
+;
+; MISC:  Program created in ACE version 3.8.3.58
+;
+;* Copyright (c) 2018 by {company name}
+
+
+
+        WHILE TRUE DO
+
+    ;MAKE SURE THE DEMO MAIN IS RUNNING
+            runstate = TASK(1,0)
+
+            CASE runstate OF
+
+              VALUE 0, 1, 2, 3:
+
+            WHILE NOT SWITCH(POWER) DO
+                IF ((STATE(4) BAND ^B100) <> 4) THEN ;if not estopped enable power
+                ENABLE POWER
+                END
+                WAIT
+            END
+
+            WHILE PARAMETER(NOT.CALIBRATED) <> 0 DO          ;if not calibrated, calibrate
+                CALIBRATE
+                WAIT.EVENT , 0.25
+            END
+
+            ABORT 0
+            WAIT.EVENT , 0.25
+            KILL 0
+
+
+            DETACH ()
+            EXECUTE 0 rob.main() ;  <--- Change Program here
+
+              VALUE 4:
+
+            IF STATE(4) == 588 THEN
+                ABORT 0
+                WAIT.EVENT , 0.25
+                KILL 0
+            END
+
+            WAIT
+            END           ; case runstate of
+
+
+
+            WAIT ; free up CPU while looping
+        END ;while true do
+.END
+
+.PROGRAM rob.place.init()
+;
+; GLOBAL REAL place.pal.xct, place.pal.yct
+        GLOBAL REAL place.pal.xsp, place.pal.ysp
+        GLOBAL REAL place.pal.index
+        GLOBAL LOC place.pal.off
+        GLOBAL LOC place.frame, place.fr.origin, place.fr.x, place.fr.y
+
+; Initialize the pallet properties
+
+        ; The number of X and Y pallet slots
+
+        place.pal.xct = 3
+        place.pal.yct = 5
+
+        ; The slot-to-slot dimensions
+
+        place.pal.xsp = 48
+        place.pal.ysp = 48
+
+        ; The index of the slot the robot is currently processing
+
+        place.pal.index = 1
+
+        ; The transform from the origin of the pallet frame to the first slot
+
+        SET place.pal.off = TRANS(0,0,0,0,0,0)
+
+; The pallet frame positions
+
+        SET place.fr.origin = TRANS(179,138,35,0,180,96) ;(299.999,-4E-03,195,0,180,-179.999)
+        SET place.fr.x = TRANS(185,138,35,0,180,96)      ;(327.999,-4E-03,195,0,180,-179.999)
+        SET place.fr.y = TRANS(185,40,35,0,180,96)       ;(327.999,46.796,195,0,180,-179.999)
+        SET place.frame = FRAME(place.fr.origin,place.fr.x,place.fr.y,place.fr.origin)
+
+        RETURN
+
+.END
+

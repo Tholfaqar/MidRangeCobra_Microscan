@@ -1,0 +1,18 @@
+.PROGRAM auto()
+;
+; ABSTRACT:         Automatic startup program run when the controller boots.
+;
+; INPUTS:
+;        MC load disk>d:\a.rob.v2
+;        MC load d:\archive\globals.var
+;        MC cycle.end 2
+;        MC execute /c 2 auto_start()
+;
+; OUTPUTS:          None
+;
+        MC LOAD DISK>d:\adept\a.rob
+        MC LOAD D:\ARCHIVE\GLOBALS.VAR
+        MC CYCLE.END 1
+        MC EXECUTE /C 1 auto_start()
+.END
+
